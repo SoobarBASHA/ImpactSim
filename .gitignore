@@ -34,3 +34,6 @@ src-tauri/target/
 
 # Vite cache
 .vite/
+
+# Local PMTiles utility
+pmtiles.exe
