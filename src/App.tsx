@@ -46,6 +46,16 @@ const MAX_BOMB_YIELD_KT =
   999_990_000;
 
 /*
+  Placed-event ring animation.
+
+  Rings expand from the event center one at a time,
+  beginning with the smallest radius and moving outward.
+*/
+const RING_ANIMATION_DURATION_MS = 520;
+
+const RING_ANIMATION_STAGGER_MS = 360;
+
+/*
   This corresponds to:
 
   C:\Users\Hassonsa\impactsim\public\maps\earth.pmtiles
@@ -85,11 +95,10 @@ type MapType =
   | "earth";
 
 type EventType =
-  | "viewer"
-  | "zoom"
   | "bomb"
   | "meteor"
-  | "earthquake";
+  | "earthquake"
+  | null;
 
 type PlaceableEventType =
   | "bomb"
@@ -162,6 +171,11 @@ type PlacedEvent =
 
     mapType:
       MapType;
+
+    /*
+      Used only for the sequential ring-expansion animation.
+    */
+    placedAt: number;
 
     /*
       Infinite City coordinates
@@ -504,6 +518,82 @@ function makeRing(
     dashed,
     modelClass,
   };
+}
+
+function getRingAnimationProgress(
+  rings: Ring[],
+  ring: Ring,
+  placedAt: number,
+  nowMs: number
+) {
+  const ordered =
+    [...rings].sort(
+      (a, b) =>
+        a.radiusKm -
+        b.radiusKm
+    );
+
+  const orderIndex =
+    Math.max(
+      0,
+      ordered.findIndex(
+        item =>
+          item === ring
+      )
+    );
+
+  const start =
+    placedAt +
+    orderIndex *
+      RING_ANIMATION_STAGGER_MS;
+
+  const raw =
+    clamp(
+      (
+        nowMs -
+        start
+      ) /
+        RING_ANIMATION_DURATION_MS,
+      0,
+      1
+    );
+
+  /*
+    Ease-out cubic gives the rings a fast initial push
+    followed by a smoother finish at their final radius.
+  */
+  return (
+    1 -
+    Math.pow(
+      1 - raw,
+      3
+    )
+  );
+}
+
+function isRingAnimationComplete(
+  event: PlacedEvent,
+  nowMs: number
+) {
+  if (
+    event.rings.length === 0
+  ) {
+    return true;
+  }
+
+  const finalStart =
+    event.placedAt +
+    (
+      event.rings.length -
+      1
+    ) *
+      RING_ANIMATION_STAGGER_MS;
+
+  return (
+    nowMs >=
+    finalStart +
+      RING_ANIMATION_DURATION_MS
+  );
 }
 
 /* =========================================================
@@ -1168,7 +1258,9 @@ function buildEarthquakeSimulation(
       ),
 
     modelStatus:
-      magnitude > 7.1
+      magnitude > 9.5
+        ? "Theoretical extreme-magnitude MMI extrapolation"
+        : magnitude > 7.1
         ? "Empirical MMI attenuation extrapolation"
         : "Empirical MMI attenuation model",
 
@@ -1213,7 +1305,7 @@ function buildEarthquakeSimulation(
 
       {
         label:
-          "MMI VIII severe",
+          "MMI VIII - Severe shaking",
 
         value:
           formatNumber(
@@ -1224,7 +1316,7 @@ function buildEarthquakeSimulation(
 
       {
         label:
-          "MMI VI strong",
+          "MMI VI - Strong shaking",
 
         value:
           formatNumber(
@@ -1235,7 +1327,7 @@ function buildEarthquakeSimulation(
 
       {
         label:
-          "MMI V moderate",
+          "MMI V - Moderate shaking",
 
         value:
           formatNumber(
@@ -1246,7 +1338,7 @@ function buildEarthquakeSimulation(
 
       {
         label:
-          "MMI IV light",
+          "MMI IV - Light shaking",
 
         value:
           formatNumber(
@@ -1257,7 +1349,7 @@ function buildEarthquakeSimulation(
 
       {
         label:
-          "MMI III felt",
+          "MMI III - Weak / felt",
 
         value:
           formatNumber(
@@ -1266,15 +1358,6 @@ function buildEarthquakeSimulation(
           " km",
       },
 
-      {
-        label:
-          "Large-earthquake warning",
-
-        value:
-          magnitude >= 8
-            ? "Large earthquakes are extended fault ruptures. Circular point-source zones remain an approximation."
-            : "Actual shaking also depends on geology, rupture geometry and site conditions.",
-      },
     ],
   };
 }
@@ -1725,16 +1808,10 @@ function buildSimulation(
 
   return {
     title:
-      args.eventType ===
-      "viewer"
-        ? "Viewer"
-        : "Zoom / Pan",
+      "Navigation",
 
     subtitle:
-      args.eventType ===
-      "viewer"
-        ? "Select a placed event."
-        : "Move around the map.",
+      "Pan the map or click a placed event to inspect it.",
 
     rings: [],
 
@@ -1743,7 +1820,7 @@ function buildSimulation(
     maxRadius: 1,
 
     modelStatus:
-      args.eventType,
+      "No placement tool selected",
   };
 }
 
@@ -2417,10 +2494,7 @@ export default function App() {
       Partial<PlacedEvent>
   ) {
     if (
-      eventType ===
-        "viewer" ||
-      eventType ===
-        "zoom"
+      eventType === null
     ) {
       return;
     }
@@ -2439,6 +2513,9 @@ export default function App() {
         payload,
 
         mapType,
+
+        placedAt:
+          Date.now(),
 
         ...extra,
 
@@ -2853,50 +2930,79 @@ export default function App() {
               }
             >
               <label>
-                Event Type
+                Placement Tool
               </label>
 
-              <select
-                value={
-                  eventType
-                }
+              <div
+                style={{
+                  display:
+                    "grid",
 
-                onChange={
-                  event => {
-                    setEventType(
-                      event.target.value as EventType
-                    );
+                  gridTemplateColumns:
+                    "1fr 1fr 1fr",
 
-                    setSelectedId(null);
+                  gap: 8,
 
-                    setPreview(false);
-                  }
-                }
-
-                style={
-                  inputStyle
-                }
+                  marginTop: 10,
+                }}
               >
-                <option value="viewer">
-                  Viewer
-                </option>
+                {[
+                  ["bomb", "Bomb"],
+                  ["meteor", "Meteor"],
+                  ["earthquake", "Earthquake"],
+                ].map(([value, label]) => {
+                  const active =
+                    eventType === value;
 
-                <option value="zoom">
-                  Zoom / Pan
-                </option>
+                  return (
+                    <button
+                      key={value}
 
-                <option value="bomb">
-                  Bomb
-                </option>
+                      type="button"
 
-                <option value="meteor">
-                  Meteor Impact
-                </option>
+                      onClick={() => {
+                        const next =
+                          active
+                            ? null
+                            : value as PlaceableEventType;
 
-                <option value="earthquake">
-                  Earthquake
-                </option>
-              </select>
+                        setEventType(
+                          next
+                        );
+
+                        setSelectedId(
+                          null
+                        );
+
+                        setPreview(
+                          false
+                        );
+                      }}
+
+                      style={{
+                        ...buttonStyle,
+
+                        background:
+                          active
+                            ? "#164e63"
+                            : "#1e293b",
+
+                        border:
+                          active
+                            ? "1px solid #67e8f9"
+                            : buttonStyle.border,
+
+                        color:
+                          active
+                            ? "#67e8f9"
+                            : "#e2e8f0",
+                      }}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
 
               <p
                 style={{
@@ -2904,15 +3010,13 @@ export default function App() {
                     "#67e8f9",
 
                   fontSize: 12,
+
+                  marginBottom: 0,
                 }}
               >
-                {eventType ===
-                "zoom"
-                  ? "Drag and scroll to navigate."
-                  : eventType ===
-                    "viewer"
-                  ? "Click an existing pin to inspect it."
-                  : "Click the map to place the selected event."}
+                {eventType === null
+                  ? "Navigation mode: drag to pan, scroll to zoom, or click a placed event to inspect it."
+                  : "Click the active tool again to deselect it and return to navigation mode."}
               </p>
             </div>
 
@@ -3251,8 +3355,8 @@ export default function App() {
 
                 <input
                   type="range"
-                  min={5}
-                  max={9.5}
+                  min={-2}
+                  max={20}
                   step={0.1}
 
                   value={
@@ -3422,10 +3526,7 @@ export default function App() {
             >
               <button
                 disabled={
-                  eventType ===
-                    "viewer" ||
-                  eventType ===
-                    "zoom"
+                  eventType === null
                 }
 
                 onClick={() => {
@@ -3781,7 +3882,19 @@ function ResultsPanel(
                   />
                 )}
 
-                <span>
+                <span
+                  style={{
+                    color:
+                      matchingRing
+                        ? matchingRing.border
+                        : "#94a3b8",
+
+                    fontWeight:
+                      matchingRing
+                        ? 700
+                        : 400,
+                  }}
+                >
                   {
                     stat.label
                   }
@@ -4128,8 +4241,7 @@ function EarthMap(
 
             This means Earth can be dragged
             and zoomed regardless of whether
-            Bomb, Meteor, Earthquake, Viewer
-            or Zoom is selected.
+            a placement tool is selected or not.
           */
           map.dragPan.enable();
 
@@ -4362,9 +4474,7 @@ function EarthMap(
             event => {
               if (
                 eventTypeRef.current ===
-                  "viewer" ||
-                eventTypeRef.current ===
-                  "zoom"
+                  null
               ) {
                 return;
               }
@@ -4434,8 +4544,10 @@ function EarthMap(
   );
 
   /*
-    Update overlays when events
-    or Preview change.
+    Update overlays when events or Preview change.
+
+    Newly placed Earth rings are redrawn every animation frame
+    until each event has finished its sequential expansion.
   */
   useEffect(
     () => {
@@ -4446,11 +4558,18 @@ function EarthMap(
         return;
       }
 
+      let animationFrame = 0;
+
       const update =
         () => {
           if (
             !map.isStyleLoaded()
           ) {
+            animationFrame =
+              requestAnimationFrame(
+                update
+              );
+
             return;
           }
 
@@ -4464,11 +4583,31 @@ function EarthMap(
             );
           }
 
+          const nowMs =
+            Date.now();
+
           updateEarthImpactSource(
             map,
             props.events,
-            props.preview
+            props.preview,
+            nowMs
           );
+
+          const stillAnimating =
+            props.events.some(
+              item =>
+                !isRingAnimationComplete(
+                  item,
+                  nowMs
+                )
+            );
+
+          if (stillAnimating) {
+            animationFrame =
+              requestAnimationFrame(
+                update
+              );
+          }
         };
 
       if (
@@ -4483,6 +4622,10 @@ function EarthMap(
       }
 
       return () => {
+        cancelAnimationFrame(
+          animationFrame
+        );
+
         map.off(
           "style.load",
           update
@@ -4673,6 +4816,13 @@ function EarthMap(
         element.onclick =
           event => {
             event.stopPropagation();
+
+            if (
+              eventTypeRef.current !==
+                null
+            ) {
+              return;
+            }
 
             props.onSelect(
               item.id
@@ -4892,7 +5042,10 @@ function updateEarthImpactSource(
     PlacedEvent[],
 
   preview:
-    Simulation | null
+    Simulation | null,
+
+  nowMs =
+    Date.now()
 ) {
   const features:
     any[] = [];
@@ -4914,11 +5067,26 @@ function updateEarthImpactSource(
       const ring of
       item.rings
     ) {
+      const progress =
+        getRingAnimationProgress(
+          item.rings,
+          ring,
+          item.placedAt,
+          nowMs
+        );
+
+      if (
+        progress <= 0
+      ) {
+        continue;
+      }
+
       const feature =
         createGeodesicCircle(
           item.longitude,
           item.latitude,
-          ring.radiusKm
+          ring.radiusKm *
+            progress
         );
 
       feature.properties = {
@@ -5047,6 +5215,67 @@ function InfiniteCityMap(
       Simulation | null;
   }
 ) {
+  const containerRef =
+    useRef<
+      HTMLDivElement | null
+    >(null);
+
+  const [
+    viewport,
+    setViewport,
+  ] =
+    useState({
+      width: VIEW_SIZE,
+      height: VIEW_SIZE,
+    });
+
+  useEffect(
+    () => {
+      const target =
+        containerRef.current;
+
+      if (!target) {
+        return;
+      }
+
+      const updateSize =
+        () => {
+          const rect =
+            target.getBoundingClientRect();
+
+          setViewport({
+            width:
+              Math.max(
+                1,
+                rect.width
+              ),
+
+            height:
+              Math.max(
+                1,
+                rect.height
+              ),
+          });
+        };
+
+      updateSize();
+
+      const observer =
+        new ResizeObserver(
+          updateSize
+        );
+
+      observer.observe(
+        target
+      );
+
+      return () => {
+        observer.disconnect();
+      };
+    },
+    []
+  );
+
   const drag =
     useRef({
       active: false,
@@ -5056,12 +5285,68 @@ function InfiniteCityMap(
       y: 0,
     });
 
+  const [
+    animationNow,
+    setAnimationNow,
+  ] =
+    useState(
+      () =>
+        Date.now()
+    );
+
+  useEffect(
+    () => {
+      let frame = 0;
+
+      const tick =
+        () => {
+          const nowMs =
+            Date.now();
+
+          setAnimationNow(
+            nowMs
+          );
+
+          const stillAnimating =
+            props.events.some(
+              item =>
+                !isRingAnimationComplete(
+                  item,
+                  nowMs
+                )
+            );
+
+          if (stillAnimating) {
+            frame =
+              requestAnimationFrame(
+                tick
+              );
+          }
+        };
+
+      tick();
+
+      return () => {
+        cancelAnimationFrame(
+          frame
+        );
+      };
+    },
+    [
+      props.events,
+    ]
+  );
+
   const pxPerKm =
     BASE_PX_PER_KM *
     props.zoom;
 
   const visibleKm =
-    VIEW_SIZE /
+    viewport.width /
+    pxPerKm;
+
+  const visibleHeightKm =
+    viewport.height /
     pxPerKm;
 
   function onClick(
@@ -5069,10 +5354,7 @@ function InfiniteCityMap(
       React.MouseEvent<HTMLDivElement>
   ) {
     if (
-      props.eventType ===
-        "viewer" ||
-      props.eventType ===
-        "zoom"
+      props.eventType === null
     ) {
       return;
     }
@@ -5110,8 +5392,7 @@ function InfiniteCityMap(
       React.WheelEvent<HTMLDivElement>
   ) {
     if (
-      props.eventType !==
-      "zoom"
+      props.eventType !== null
     ) {
       return;
     }
@@ -5183,8 +5464,23 @@ function InfiniteCityMap(
       React.PointerEvent<HTMLDivElement>
   ) {
     if (
-      props.eventType !==
-      "zoom"
+      props.eventType !== null
+    ) {
+      return;
+    }
+
+    const target =
+      event.target as HTMLElement;
+
+    /*
+      Event pins are buttons. Do not let the map's
+      drag handler capture their pointer before the
+      button receives its click.
+    */
+    if (
+      target.closest(
+        "button"
+      )
     ) {
       return;
     }
@@ -5211,8 +5507,7 @@ function InfiniteCityMap(
   ) {
     if (
       !drag.current.active ||
-      props.eventType !==
-        "zoom"
+      props.eventType !== null
     ) {
       return;
     }
@@ -5250,6 +5545,10 @@ function InfiniteCityMap(
 
   return (
     <div
+      ref={
+        containerRef
+      }
+
       onClick={
         onClick
       }
@@ -5281,12 +5580,10 @@ function InfiniteCityMap(
           "hidden",
 
         cursor:
-          props.eventType ===
-          "zoom"
-            ? "grab"
-            : props.eventType ===
-              "viewer"
-            ? "pointer"
+          props.eventType === null
+            ? drag.current.active
+              ? "grabbing"
+              : "grab"
             : "crosshair",
 
         touchAction:
@@ -5308,6 +5605,18 @@ function InfiniteCityMap(
 
         visibleKm={
           visibleKm
+        }
+
+        visibleHeightKm={
+          visibleHeightKm
+        }
+
+        viewportWidth={
+          viewport.width
+        }
+
+        viewportHeight={
+          viewport.height
         }
       />
 
@@ -5358,6 +5667,10 @@ function InfiniteCityMap(
         visibleKm={
           visibleKm
         }
+
+        viewportWidth={
+          viewport.width
+        }
       />
 
       {props.preview && (
@@ -5371,11 +5684,11 @@ function InfiniteCityMap(
           }
 
           centerX={
-            VIEW_SIZE / 2
+            viewport.width / 2
           }
 
           centerY={
-            VIEW_SIZE / 2
+            viewport.height / 2
           }
         />
       )}
@@ -5392,7 +5705,7 @@ function InfiniteCityMap(
           }
 
           const left =
-            VIEW_SIZE / 2 +
+            viewport.width / 2 +
             (
               item.xKm -
               props.cameraX
@@ -5400,7 +5713,7 @@ function InfiniteCityMap(
               pxPerKm;
 
           const top =
-            VIEW_SIZE / 2 +
+            viewport.height / 2 +
             (
               item.yKm -
               props.cameraY
@@ -5429,12 +5742,27 @@ function InfiniteCityMap(
                 centerY={
                   top
                 }
+
+                animationStartMs={
+                  item.placedAt
+                }
+
+                animationNowMs={
+                  animationNow
+                }
               />
 
               <button
                 onClick={
                   event => {
                     event.stopPropagation();
+
+                    if (
+                      props.eventType !==
+                        null
+                    ) {
+                      return;
+                    }
 
                     props.onSelect(
                       item.id
@@ -5524,6 +5852,8 @@ function InfiniteCityMap(
 function CityScaleBar(
   props: {
     visibleKm: number;
+
+    viewportWidth: number;
   }
 ) {
   const target =
@@ -5573,7 +5903,7 @@ function CityScaleBar(
       scaleKm /
       props.visibleKm
     ) *
-    VIEW_SIZE;
+    props.viewportWidth;
 
   return (
     <div
@@ -5653,14 +5983,39 @@ function FlatRingLayer(
     centerX: number;
 
     centerY: number;
+
+    animationStartMs?:
+      number;
+
+    animationNowMs?:
+      number;
   }
 ) {
   return (
     <>
       {props.rings.map(
         ring => {
+          const progress =
+            props.animationStartMs ===
+              undefined
+              ? 1
+              : getRingAnimationProgress(
+                  props.rings,
+                  ring,
+                  props.animationStartMs,
+                  props.animationNowMs ??
+                    Date.now()
+                );
+
+          if (
+            progress <= 0
+          ) {
+            return null;
+          }
+
           const diameter =
             ring.radiusKm *
+            progress *
             props.pxPerKm *
             2;
 
@@ -5704,6 +6059,9 @@ function FlatRingLayer(
                 background:
                   ring.fill,
 
+                opacity:
+                  progress,
+
                 pointerEvents:
                   "none",
 
@@ -5730,6 +6088,12 @@ function CanvasCity(
     cameraY: number;
 
     visibleKm: number;
+
+    visibleHeightKm: number;
+
+    viewportWidth: number;
+
+    viewportHeight: number;
   }
 ) {
   const ref =
@@ -5763,12 +6127,22 @@ function CanvasCity(
         );
 
       canvas.width =
-        VIEW_SIZE *
-        dpr;
+        Math.max(
+          1,
+          Math.round(
+            props.viewportWidth *
+            dpr
+          )
+        );
 
       canvas.height =
-        VIEW_SIZE *
-        dpr;
+        Math.max(
+          1,
+          Math.round(
+            props.viewportHeight *
+            dpr
+          )
+        );
 
       canvas.style.width =
         "100%";
@@ -5788,8 +6162,8 @@ function CanvasCity(
       context.clearRect(
         0,
         0,
-        VIEW_SIZE,
-        VIEW_SIZE
+        props.viewportWidth,
+        props.viewportHeight
       );
 
       context.fillStyle =
@@ -5798,8 +6172,8 @@ function CanvasCity(
       context.fillRect(
         0,
         0,
-        VIEW_SIZE,
-        VIEW_SIZE
+        props.viewportWidth,
+        props.viewportHeight
       );
 
       const blockKm = 2;
@@ -5833,7 +6207,7 @@ function CanvasCity(
           Math.floor(
             (
               props.cameraY -
-              props.visibleKm / 2
+              props.visibleHeightKm / 2
             ) /
               blockKm
           ) -
@@ -5843,7 +6217,7 @@ function CanvasCity(
           Math.ceil(
             (
               props.cameraY +
-              props.visibleKm / 2
+              props.visibleHeightKm / 2
             ) /
               blockKm
           ) +
@@ -5860,7 +6234,7 @@ function CanvasCity(
             y++
           ) {
             const screenX =
-              VIEW_SIZE / 2 +
+              props.viewportWidth / 2 +
               (
                 x * blockKm -
                 props.cameraX
@@ -5868,7 +6242,7 @@ function CanvasCity(
                 props.pxPerKm;
 
             const screenY =
-              VIEW_SIZE / 2 +
+              props.viewportHeight / 2 +
               (
                 y * blockKm -
                 props.cameraY
@@ -5974,7 +6348,10 @@ function CanvasCity(
         */
 
         const rawCellKm =
-          props.visibleKm /
+          Math.max(
+            props.visibleKm,
+            props.visibleHeightKm
+          ) /
           28;
 
         const options = [
@@ -6045,7 +6422,7 @@ function CanvasCity(
           Math.floor(
             (
               props.cameraY -
-              props.visibleKm / 2
+              props.visibleHeightKm / 2
             ) /
               cellKm
           ) -
@@ -6055,7 +6432,7 @@ function CanvasCity(
           Math.ceil(
             (
               props.cameraY +
-              props.visibleKm / 2
+              props.visibleHeightKm / 2
             ) /
               cellKm
           ) +
@@ -6072,7 +6449,7 @@ function CanvasCity(
             y++
           ) {
             const screenX =
-              VIEW_SIZE / 2 +
+              props.viewportWidth / 2 +
               (
                 x * cellKm -
                 props.cameraX
@@ -6080,7 +6457,7 @@ function CanvasCity(
                 props.pxPerKm;
 
             const screenY =
-              VIEW_SIZE / 2 +
+              props.viewportHeight / 2 +
               (
                 y * cellKm -
                 props.cameraY
@@ -6127,6 +6504,9 @@ function CanvasCity(
       props.cameraX,
       props.cameraY,
       props.visibleKm,
+      props.visibleHeightKm,
+      props.viewportWidth,
+      props.viewportHeight,
     ]
   );
 
